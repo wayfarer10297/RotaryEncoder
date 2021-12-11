@@ -1,125 +1,133 @@
 /*==================================================================================
   Filename: RotaryEncoder.ino
   Author  : Roger Thompson
-  Date  :   18-October-2021
+  Version :	2
+  Date	  :	21-October-2021
 ==================================================================================*/
-
 
 /*****************************************************************************************
 DESCRIPTION:
-  This sketch defines a class and interrupt routines for a Rotary Encoder
+This sketch defines a simple Class and the interrupt routines for a Rotary Encoder. The
+loop() function contains diagnostic code to monitor the performance of the software
+detecting the changes of state of the RE. The counting is imperfect and errors are in the
+range of 5%->10% in terms of increments being detected as decrements and vice versa.  If
+the knob is rotated fairly slowly and smoothly, as would be the case if it is being used
+to negotiate a menu system, then the error rate is somewhat less than this and the
+performance should be adequate for AudioNav.
 
+The Rotary Encoder connections to the ESP32 are as follows:
 
- Rotary Encoder connections to the ESP3a2 are as follows:
-    Ground      Ground
-    Vcc         5v
-    CLK     	GPIO36 on ESP32 (labelled SP on the ciruit board)
-    DT      	GPIO34 on ESP32
-    SW      	GPIO35 on ESP332 (labelled "SP" on the board)
-*******************************************************************************************/
+    Encoder		ESP32
+    =======     =====
+    Ground      n/a
+    Vcc         Uses the 3.3V output pin on the ESP32
+    CLK     	GPIO34  (has 470nF connected to ground)
+    DT      	GPIO39  (labelled "SN" on the ESP32 board) (has 100nF connected to ground)
+    SW      	GPIO36  (labelled "SP" on the ESP32 board) (has 470nF connected to ground)
+ *******************************************************************************************/
+
 #include "Arduino.h"
 
-#define CLK_PIN   36
-#define DT_PIN    34
-#define SW_PIN    35
+#define CLK_PIN   34
+#define DT_PIN    39
+#define SW_PIN    36
 
 
 class RotaryEncoder{
-public:
-	bool buttonPressed;
-	bool clockPulseReceived;
-	long timeOfLastButtonPress;
 	int clockCount;
-	int sumIncrements, sumDecrements;  // for diagnostics only
+public:
+	volatile bool buttonPress = false;	// the Switch pin has gone HIGH
+	volatile bool clockPulse = false;	// the Clock pin has gone HIGH
+	volatile bool dtLevel = 0;			// level on DT pin when the Clock pin went HIGH
 
 	//default constructorRotaryEncoder(){
 	RotaryEncoder(){
-		buttonPressed = false;
-		timeOfLastButtonPress = 0;
-		clockPulseReceived = false;
+		buttonPress = false;
+		clockPulse = false;
+		dtLevel = 0;
 		clockCount = 0;
-		sumIncrements = sumDecrements = 0;
 	}
 
-	void updateClockCount(){
-		int dtValue = digitalRead(DT_PIN);
-		int clkValue = digitalRead(CLK_PIN);
-		Serial.print("dtValue = "); Serial.print(dtValue); Serial.print("\t clkValue = "); Serial.println(clkValue);
-		if (dtValue == clkValue) {
-			Serial.print ("Anti-clockwise:  decrement");
-			sumDecrements++;
-			clockCount--;
-		} else {
-			Serial.print ("Clockwise: INCREMENT       ");
-			clockCount++;
-			sumIncrements++;
-		}
-		clockPulseReceived = false;
+	void updateCount(){
+		if(dtLevel) clockCount--; else clockCount++;
+		clockPulse = false;
 	}
 
-private:
+	void resetCount(){
+		clockCount = 0;
+	}
+
+	int getCount(){
+		return(clockCount);
+	}
 };
 
 
 RotaryEncoder rotaryEncoder;  // create an instance of the RotaryEncoder class
 
 
-// Interrupt Service Routine activated when the button on the rotary encoder is pressed
+
+portMUX_TYPE synch = portMUX_INITIALIZER_UNLOCKED;
+
 void IRAM_ATTR isrSwitch(){
-	rotaryEncoder.buttonPressed = true;
+	//portENTER_CRITICAL(&synch);
+	static unsigned long prevMicros;
+	unsigned long thisMicros = micros();
+	if(thisMicros - prevMicros >5000) rotaryEncoder.buttonPress = true;
+	prevMicros = thisMicros;
+	//portEXIT_CRITICAL(&synch);
 }
 
-// Interrupt Service Routine activated when the knob on the rotary encoder is turned
+
 void IRAM_ATTR isrClock(){
-	rotaryEncoder.clockPulseReceived = true;
+	//portENTER_CRITICAL(&synch);
+	static unsigned long prevMicros;
+	unsigned long thisMicros = micros();
+	if(thisMicros - prevMicros >5000) {
+		rotaryEncoder.clockPulse = true;
+		rotaryEncoder.dtLevel = digitalRead(DT_PIN);  // read the DT pin to determine direction
+	}
+	prevMicros = thisMicros;
+	//portEXIT_CRITICAL(&synch);
 }
-
 
 
 void setup(){
 	// set the Rotary Encoder pins to INPUT mode (all three have 10k pull-up resistor on the board)
+	pinMode(SW_PIN,INPUT);
 	pinMode(CLK_PIN,INPUT);
 	pinMode(DT_PIN,INPUT);
-	pinMode(SW_PIN,INPUT);
+
 	Serial.begin(115200);
-	delay(1000);
-
-	attachInterrupt(SW_PIN, isrSwitch, HIGH);
-	attachInterrupt(CLK_PIN, isrClock, FALLING);
-	//attachInterrupt(DT_PIN, isrDt, CHANGE);
-
-	Serial.println("Set-up completed");
+	while(!Serial);
+	attachInterrupt(SW_PIN, isrSwitch, RISING);
+	attachInterrupt(CLK_PIN, isrClock, RISING);
+	Serial.println("Set-up complete");
 }
 
 
 
 void loop(){
+	static int t = 0;
+	static long thisMicros = 0;
+	static long prevMicros = 0;
 
-	if(rotaryEncoder.buttonPressed){
-		Serial.println("ISR called:  The button has been pressed");
-		// execute appropriate menu actions here (or perhaps wait to see if a doubleClick is coming?  More work needed!)
-		rotaryEncoder.buttonPressed = false;
-		rotaryEncoder.sumIncrements = rotaryEncoder.sumDecrements = rotaryEncoder.clockCount = 0;  // zero diagnostic counters when button pressed
+	if (rotaryEncoder.buttonPress) {
+		Serial.print(digitalRead(SW_PIN));
+		thisMicros = micros();
+		Serial.print("   Transition: "); Serial.print(t);  Serial.print ("          ");
+		Serial.print(thisMicros); Serial.print ("    "); Serial.print(thisMicros - prevMicros);
+		Serial.print ("    ");
+		Serial.println(digitalRead(SW_PIN));
 
-		if ((millis() - rotaryEncoder.timeOfLastButtonPress) < 100) {
-			Serial.println("The button has been DOUBLE CLICKED");
-			// execute appropriate menu actions here
-		}
-		rotaryEncoder.timeOfLastButtonPress = millis();2
+		prevMicros = thisMicros;
+		rotaryEncoder.buttonPress = false;
+		rotaryEncoder.resetCount();
 	}
 
-	if(rotaryEncoder.clockPulseReceived){
-		noInterrupts();
-		rotaryEncoder.updateClockCount();
-		interrupts();
-
-		Serial.print("\t\t\t\t\t Updated count:  ");
-		Serial.print(rotaryEncoder.clockCount);
-		Serial.print("\t sumIcrements:  ");
-		Serial.print(rotaryEncoder.sumIncrements);
-		Serial.print("\t sumDecrements:  ");
-		Serial.println(rotaryEncoder.sumDecrements);
-
+	if(rotaryEncoder.clockPulse){
+		rotaryEncoder.updateCount();
+		Serial.print("DT level = "); Serial.print(rotaryEncoder.dtLevel); Serial.print("  ");
+		Serial.print(millis());   Serial.print("    Count: "); Serial.println(rotaryEncoder.getCount());
 	}
-
 }
